@@ -1,0 +1,1 @@
+pyinstaller --onefile fc2_record.py

@@ -49,6 +49,13 @@ class ProxyServer:
         else:
             return web.Response(body=data)
 
+def test_ffmpeg():
+    try:
+        p = subprocess.run(['ffmpeg'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return (p.returncode == 1)
+    except FileNotFoundError:
+        return False
+
 class FC2Handler:
     def __init__(self, channel_id):
         self.channel_id = channel_id
@@ -76,7 +83,8 @@ class FC2Handler:
     async def ffmpeg_worker(self):
         with open(self.basename + '.ts.log', 'at', encoding='utf-8') as f:
             cmd = 'ffmpeg -hide_banner -i "http://%s:%s/m3u8" -c copy %s.ts' % (ADDR, PORT, self.basename)
-            await asyncio.create_subprocess_shell(cmd, stdout=f, stderr=f)
+            p = await asyncio.create_subprocess_shell(cmd, stdout=f, stderr=f)
+            await p.wait()
 
     def log(self, msg, print_log=False):
         self.log_queue.put_nowait((msg, print_log))
@@ -192,6 +200,9 @@ class FC2Handler:
             return data.get('name', None)
 
 if __name__ == '__main__':
+    if not test_ffmpeg():
+        print('Please make sure ffmpeg is installed and added to PATH')
+        exit(1)
     if len(sys.argv) != 2:
         print(sys.argv[0], '<channel_id>')
     else:
