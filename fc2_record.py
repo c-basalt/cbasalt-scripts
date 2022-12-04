@@ -25,8 +25,16 @@ class ProxyServer:
     async def start(self):
         runner = web.AppRunner(self.app)
         await runner.setup()
-        site = web.TCPSite(runner, ADDR, PORT)
-        await site.start()
+        addr, port = ADDR, PORT
+        for i in range(10000):
+            try:
+                site = web.TCPSite(runner, addr, port)
+                await site.start()
+                print('server started at %s:%s' % (addr, port))
+                return addr, port
+            except OSError:
+                port += 1
+        raise OSError('Failed to initiate proxy server')
 
     @staticmethod
     def process_m3u8(m3u8_str):
@@ -82,7 +90,7 @@ class FC2Handler:
     
     async def ffmpeg_worker(self):
         with open(self.basename + '.ts.log', 'at', encoding='utf-8') as f:
-            cmd = 'ffmpeg -hide_banner -i "http://%s:%s/m3u8" -c copy %s.ts' % (ADDR, PORT, self.basename)
+            cmd = 'ffmpeg -hide_banner -i "http://%s:%s/m3u8" -c copy %s.ts' % (self.addr, self.port, self.basename)
             p = await asyncio.create_subprocess_shell(cmd, stdout=f, stderr=f)
             await p.wait()
 
@@ -119,6 +127,7 @@ class FC2Handler:
         }
         data = await self.post('https://live.fc2.com/api/memberApi.php', payload)
         assert data['data']["channel_data"]["version"], 'channel is not on live'
+        assert data['data']["channel_data"]["is_publish"], 'channel is not on live'
         self.log(json.dumps(data, ensure_ascii=False))
         return {
             'channel_version': data['data']["channel_data"]["version"]
@@ -149,7 +158,7 @@ class FC2Handler:
     async def main(self):
         headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/86.0.4240.198 Safari/537.36"}
         self.session = aiohttp.ClientSession(headers=headers)
-        await self.server.start()
+        self.addr, self.port = await self.server.start()
         url = await self.get_control_server()
         async with self.session.ws_connect(url) as websocket:
             self.websocket = websocket
