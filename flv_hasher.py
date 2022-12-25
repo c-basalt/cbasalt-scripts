@@ -9,6 +9,7 @@ import time
 import multiprocessing as mp
 import argparse
 import traceback
+import re
 
 logger = logging.getLogger()
 
@@ -96,7 +97,7 @@ class FlvReader(object):
         tag_size = self.read_ui32()
         if tag_size != data_size + 11:
             logger.warn('Tag size %d does not match data size %d' % (tag_size, data_size))
-        flv_tag = FlvTag(tag_type, timestamp, data, fh_pos)
+        flv_tag = FlvTag(tag_type, timestamp, data, fh_pos, self.args)
         return flv_tag
 
     def iter_tag(self):
@@ -156,13 +157,46 @@ class FlvReader(object):
         print('done %.2fs' % (time.time() - start_time, ))
 
 class FlvTag(object):
-    def __init__(self, type_id, timestamp, data, pos):
+    def __init__(self, type_id, timestamp, data, pos, args):
+        self.args = args
         self.type_id = type_id
         self.timestamp = timestamp
-        self.data = data
+        self._data = data
         self.pos = pos
-        self.md5, self.sha1 = get_md5_hex(data), get_sha1_hex(data)
+        self.md5, self.sha1 = get_md5_hex(self.data), get_sha1_hex(self.data)
         self.parse_meta()
+    
+    @staticmethod
+    def filter_hls(data):
+        if data[5:10].startswith(b'\x00\x00\x00\x02'):
+            if data[0] == 0x17:
+                assert data[5:11] == b"\x00\x00\x00\x02\t\xf0", str(data[0:5]) + str(data[5:20]) + self.type
+                assert data[11:15] == b"\x00\x00\x00\x0e", data[11:15]
+                assert data[40-11:44-11] == b"\x00\x00\x00\x04", data[40-11:44-11]
+                return data[0:5] + data[48-11:]
+            else:
+                assert data[5:11] == b"\x00\x00\x00\x02\x09\xf0", str(data[0:5]) + str(data[5:20]) + self.type
+                return data[0:5] + data[11:]
+        else:
+            return data
+
+    header_re = re.compile(b'\x00\x00\x00\x3e\x06\x05:BVCLIVETIMESTAMP{"author":"nginx","curr_ms":\\d{13}}\x80')
+    @classmethod
+    def filter_vheader(cls, data):
+        if b'BVCLIVETIMESTAMP' in data[:80]:
+            assert cls.header_re.match(data[5:5+66]), data[5:80]
+            return data[:5] + data[5+66:]
+        else:
+            return data
+    @property
+    def data(self):
+        data = self._data
+        if self.args.hls_fix:
+            data = self.filter_hls(data)
+        if not self.args.vheader_ignore:
+            data = self.filter_vheader(data)
+        return data
+
     def parse_meta(self):
         self.meta = {}
         if not self.data:
@@ -235,15 +269,31 @@ def main():
     parser.add_argument('files', type=str, nargs='+')
     parser.add_argument('--dump_script', action='store_true')
     parser.add_argument('--print_first', action='store_true')
-    parser.add_argument('--skip_existing', action='store_true')
+    parser.add_argument('--skip_existing', action='store_true', help='skip hashing if a hash text file already exists')
+    parser.add_argument('--vheader_ignore', action='store_true', help='skip removal of BVCLIVETIMESTAMP header from video data')
+    parser.add_argument('--hls_fix', action='store_true', help='remove 2-byte padding(?) from ts data')
+    parser.add_argument('--get_tag', type=int, metavar='<start>', help='extract the raw data of a tag using its start_pos instead of calc hashes of tags')
     args = parser.parse_args()
-    for fn in args.files:
+    if args.get_tag:
         try:
-            with open(fn, 'rb') as f:
+            with open(args.files[0], 'rb') as f:
                 reader = FlvReader(f, args)
-                reader.dump_hash()
+                f.seek(args.get_tag)
+                tag = reader.get_next_tag()
+                print(tag)
+                f.seek(args.get_tag)
+                with open(tag.hexdigest, 'wb') as f_tag:
+                    f_tag.write(f.read(len(tag.data)+15))
         except Exception:
             traceback.print_exc()
+    else:
+        for fn in args.files:
+            try:
+                with open(fn, 'rb') as f:
+                    reader = FlvReader(f, args)
+                    reader.dump_hash()
+            except Exception:
+                traceback.print_exc()
 
 if __name__ == '__main__':
     main()
