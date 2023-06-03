@@ -166,14 +166,16 @@ class FlvTag(object):
         self.md5, self.sha1 = get_md5_hex(self.data), get_sha1_hex(self.data)
         self.parse_meta()
     
-    @staticmethod
-    def filter_hls(data):
+    def filter_hls(self, data):
         if data[5:10].startswith(b'\x00\x00\x00\x02'):
             if data[0] == 0x17:
                 assert data[5:11] == b"\x00\x00\x00\x02\t\xf0", str(data[0:5]) + str(data[5:20]) + self.type
-                assert data[11:15] == b"\x00\x00\x00\x0e", data[11:15]
-                assert data[40-11:44-11] == b"\x00\x00\x00\x04", data[40-11:44-11]
-                return data[0:5] + data[48-11:]
+                if data[11:15] == b"\x00\x00\x00\x0e":
+                    assert data[40-11:44-11] == b"\x00\x00\x00\x04", data[40-11:44-11]
+                    return data[0:5] + data[48-11:]
+                elif data[11:15] == b"\x00\x00\x00\x27":
+                    assert data[54:58] == b"\x00\x00\x00\x04"
+                    return data[0:5] + data[62:]
             else:
                 assert data[5:11] == b"\x00\x00\x00\x02\x09\xf0", str(data[0:5]) + str(data[5:20]) + self.type
                 return data[0:5] + data[11:]
@@ -181,12 +183,37 @@ class FlvTag(object):
             return data
 
     header_re = re.compile(b'\x00\x00\x00\x3e\x06\x05:BVCLIVETIMESTAMP{"author":"nginx","curr_ms":\\d{13}}\x80')
-    @classmethod
-    def filter_vheader(cls, data):
-        if b'BVCLIVETIMESTAMP' in data[:80]:
-            assert cls.header_re.match(data[5:5+66]), data[5:80]
-            return data[:5] + data[5+66:]
+    def filter_vheader(self, data):
+        if data[5:10].startswith(b'\x00\x00\x00\x02\t'):
+            data = data[:5] + data[11:]
+        if b'BVCLIVETIMESTAMP' in data[:300]:
+            if self.header_re.match(data[5:5+66]):
+                return data[:5] + data[5+66:]
+            elif b'\x00\x00\x00t\x06\x05pBVCLIVETIMESTAMP{"author":"pc_link","author_ver":"4.38.1.4464"' in data[:300]:
+                header_index = data[:390].index(b'\x00\x00\x00t\x06\x05pBVCLIVETIMESTAMP')
+                pre_header = data[5:header_index]
+                while pre_header:
+                    assert pre_header[:3] == b'\x00\x00\x00'
+                    body_length = pre_header[3]
+                    assert body_length+4 <= len(pre_header)
+                    pre_header = pre_header[body_length+4:]
+                header_end = header_index + len(b'\x00\x00\x00t\x06\x05pBVCLIVETIMESTAMP{"author":"pc_link","author_ver":"4.38.1.4464","clock_max_error_ms":235,"curr_ms":1678201398976}\x80')
+                return data[:5] + data[header_end:]
+            elif b'BILIAVC.1.4.2 - H.264/AVC codec - Copyright 2019-2021' in data[:300]:
+                header_index = data[:390].index(b'\x00\x00\x00\x98\x06\x05')
+                pre_header = data[5:header_index]
+                while pre_header:
+                    assert pre_header[:3] == b'\x00\x00\x00'
+                    body_length = pre_header[3]
+                    assert body_length+4 <= len(pre_header)
+                    pre_header = pre_header[body_length+4:]
+                header_end = header_index + len(b'\x00\x00\x00\x98\x06\x05X\xb3\xe1c0\x8c<\x9eO\xc29\x81\t~\xaa\xa5. BILIAVC.1.4.2 - H.264/AVC codec - Copyright 2019-2021 (c) Bilibili Inc\x00\x05:BVCLIVETIMESTAMP{"author":"nginx","curr_ms":1679663515323}\x80')
+                assert re.match(b':BVCLIVETIMESTAMP{"author":"nginx","curr_ms":\\d{13}}\x80', data[header_end-len(b':BVCLIVETIMESTAMP{"author":"nginx","curr_ms":1679663515323}\x80'):header_end])
+                return data[:5] + data[header_end:] 
+            else:
+                raise NotImplementedError('unexpected data %s' % data[5:300])
         else:
+            assert data[:3] != b'\x00\x00\x00'
             return data
     @property
     def data(self):
@@ -272,18 +299,24 @@ def main():
     parser.add_argument('--skip_existing', action='store_true', help='skip hashing if a hash text file already exists')
     parser.add_argument('--vheader_ignore', action='store_true', help='skip removal of BVCLIVETIMESTAMP header from video data')
     parser.add_argument('--hls_fix', action='store_true', help='remove 2-byte padding(?) from ts data')
-    parser.add_argument('--get_tag', type=int, metavar='<start>', help='extract the raw data of a tag using its start_pos instead of calc hashes of tags')
+    parser.add_argument('--get_tag', type=int, metavar='<start>', help='extract the data of a tag using its start_pos instead of calc hashes of tags')
+    parser.add_argument('--get_raw', type=int, metavar='<start>', help='extract the raw bytes of a tag using its start_pos instead of calc hashes of tags')
     args = parser.parse_args()
-    if args.get_tag:
+    if args.get_tag or args.get_raw:
         try:
             with open(args.files[0], 'rb') as f:
                 reader = FlvReader(f, args)
-                f.seek(args.get_tag)
+                pos = args.get_tag or args.get_raw
+                f.seek(pos)
                 tag = reader.get_next_tag()
+                if args.get_tag:
+                    with open(tag.hexdigest+'.data', 'wb') as f_tag:
+                        f_tag.write(tag.data)
                 print(tag)
-                f.seek(args.get_tag)
-                with open(tag.hexdigest, 'wb') as f_tag:
-                    f_tag.write(f.read(len(tag.data)+15))
+                f.seek(pos)
+                if args.get_raw:
+                    with open(tag.hexdigest+'.raw', 'wb') as f_tag:
+                        f_tag.write(f.read(len(tag.data)+15))
         except Exception:
             traceback.print_exc()
     else:
